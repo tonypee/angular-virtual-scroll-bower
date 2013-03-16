@@ -1,4 +1,4 @@
-// angular-virtual-scroll - v0.1.0
+// angular-virtual-scroll - v0.2.0
 
 // Include this first to define the module that the directives etc. hang off.
 //

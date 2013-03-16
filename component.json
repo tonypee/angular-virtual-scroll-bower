@@ -1,10 +1,9 @@
 {
   "name": "angular-virtual-scroll",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "author": "Paul Thomas <paul@stackfull.com>",
   "main": "./angular-virtual-scroll.min.js",
   "dependencies": {
     "angular": ">= 1.0.0"
   }
 }
-
