@@ -1,4 +1,4 @@
-// angular-virtual-scroll - v0.3.1
+// angular-virtual-scroll - v0.4.0
 
 // Include this first to define the module that the directives etc. hang off.
 //
@@ -123,10 +123,22 @@ mod.directive("sfScroller", function(){
   'use strict';
   // (part of the sf.virtualScroll module).
   var mod = angular.module('sf.virtualScroll');
+  var DONT_WORK_AS_VIEWPORTS = ['TABLE', 'TBODY', 'THEAD', 'TR', 'TFOOT'];
 
-  mod.directive('sfVirtualRepeat', ['$log', function($log){
+  // Utility to clip to range
+  function clip(value, min, max){
+    if( angular.isArray(value) ){
+      return angular.forEach(value, function(v){
+        return clip(v, min, max);
+      });
+    }
+    return Math.max(min, Math.min(value, max));
+  }
+
+  mod.directive('sfVirtualRepeat', ['$log', '$rootElement', function($log, $rootElement){
 
     return {
+      require: '?ngModel',
       transclude: 'element',
       priority: 1000,
       terminal: true,
@@ -148,6 +160,31 @@ mod.directive("sfScroller", function(){
         value: match[1],
         collection: match[2]
       };
+    }
+
+    // Utility to find the viewport element given the start element
+    function findViewport(startElement){
+      /*jshint eqeqeq:false, curly:false */
+      var root = $rootElement[0];
+      var e, n, t, tag;
+      for( e = startElement.parent().parent()[0]; e !== root; e = e.parentNode ){
+        if( e.nodeType != 1 ) break;
+        tag = e.tagName.toUpperCase();
+        for( t = 0; t < DONT_WORK_AS_VIEWPORTS.length; t++ ){
+          if( DONT_WORK_AS_VIEWPORTS[t] === tag ) break;
+        }
+        if( t < DONT_WORK_AS_VIEWPORTS.length ) continue;
+        if( e.childElementCount != 1 ) continue;
+        for( n = e.firstChild; n; n = n.nextSibling ){
+          if( n.nodeType == 3 && /\S/g.test(n.textContent) ){
+            break;
+          }
+        }
+        if( n == null ){
+          return angular.element(e);
+        }
+      }
+      throw new Error("No suitable viewport element");
     }
 
     // Apply explicit height and overflow styles to the viewport element.
@@ -224,34 +261,35 @@ mod.directive("sfScroller", function(){
       // Set up the initial value for our watch expression (which is just the
       // start and length of the active rows and the collection length) and
       // adds a listener to handle child scopes based on the active rows.
-      function sfVirtualRepeatPostLink(scope, iterStartElement /*, attr*/){
+      function sfVirtualRepeatPostLink(scope, iterStartElement, attrs){
 
-        var coll = scope.$eval(ident.collection);
+        var state = 'ngModel' in attrs ? scope.$eval(attrs.ngModel) : {};
         var rendered = [];
         var rowHeight = 0;
-        var visibleRows = 0;
-        // The list structure is controlled by a few simple state variables
-        var active = {
-          // The index of the first active element
-          start: 0,
-          // The number of active elements
-          active: 20,
-          // The total number of elements
-          len: coll.length
-        };
         var sticky = false;
-        var content = iterStartElement.parent();
+        var viewport = findViewport(iterStartElement);
+        var content = viewport.children();
 
-        var viewport = content.parent(); //TODO: clever viewport finder
+        // The list structure is controlled by a few simple state variables:
+        //  - The index of the first active element
+        state.firstActive = 0;
+        //  - The index of the first visible element
+        state.firstVisible = 0;
+        //  - The number of elements visible in the viewport.
+        state.visible = 0;
+        // - The number of active elements
+        state.active = 0;
+        // - The total number of elements
+        state.total = 0;
 
         setContentCss(content);
         setViewportCss(viewport);
-        // When the user scrolls, we move the active.start
+        // When the user scrolls, we move the state.firstActive
         viewport.bind('scroll', sfVirtualRepeatOnScroll);
 
         // The watch on the collection is just a watch on the length of the
         // collection. We don't care if the content changes.
-        scope.$watch(sfVirtualRepeatWatchExpression, sfVirtualRepeatListener);
+        scope.$watch(sfVirtualRepeatWatchExpression, sfVirtualRepeatListener, true);
 
         // and that's the link done! All the action is in the handlers...
         return;
@@ -271,13 +309,13 @@ mod.directive("sfScroller", function(){
 
         function makeNewScope (idx, collection, containerScope) {
           var childScope = containerScope.$new();
-          childScope[ident.value] = coll[idx];
+          childScope[ident.value] = collection[idx];
           childScope.$index = idx;
           childScope.$first = (idx === 0);
-          childScope.$last = (idx === (coll.length - 1));
+          childScope.$last = (idx === (collection.length - 1));
           childScope.$middle = !(childScope.$first || childScope.$last);
           childScope.$watch(function updateChildScopeItem(){
-            childScope[ident.value] = coll[idx];
+            childScope[ident.value] = collection[idx];
           });
           return childScope;
         }
@@ -296,43 +334,45 @@ mod.directive("sfScroller", function(){
           return newElements;
         }
 
+        function recomputeActive() {
+          // We want to set the start to the low water mark unless the current
+          // start is already between the low and high water marks.
+          var start = clip(state.firstActive, state.firstVisible - LOW_WATER, state.firstVisible - HIGH_WATER);
+          // Similarly for the end
+          var end = clip(state.firstActive + state.active,
+                         state.firstVisible + state.visible + LOW_WATER,
+                         state.firstVisible + state.visible + HIGH_WATER );
+          state.firstActive = Math.max(0, start);
+          state.active = Math.min(end, state.total) - state.firstActive;
+        }
+
         function sfVirtualRepeatOnScroll(evt){
-          var top = evt.target.scrollTop,
-              firstVisibleRow = Math.floor(top / rowHeight),
-              start = Math.max(0,
-                Math.min(firstVisibleRow - LOW_WATER,
-                  Math.max(firstVisibleRow - HIGH_WATER, active.start))),
-              end;
-          visibleRows = Math.ceil(viewport[0].clientHeight / rowHeight);
-          end = Math.min(
-            active.len,
-            Math.max(firstVisibleRow + visibleRows + LOW_WATER,
-               Math.min(firstVisibleRow + visibleRows + HIGH_WATER,
-                        active.start + active.active)));
-          $log.log('scroll to row %o (show %o - %o)', firstVisibleRow, start, end);
+          if( !rowHeight ){
+            return;
+          }
           // Enter the angular world for the state change to take effect.
           scope.$apply(function(){
+            state.firstVisible = Math.floor(evt.target.scrollTop / rowHeight),
+            state.visible = Math.ceil(viewport[0].clientHeight / rowHeight);
+            $log.log('scroll to row %o', state.firstVisible);
             sticky = evt.target.scrollTop + evt.target.clientHeight >= evt.target.scrollHeight;
-            active = {
-              start: start,
-              active: end - start,
-              len: active.len
-            };
-            $log.log('active is now %o', active);
-            $log.log('sticky = %o', sticky);
+            recomputeActive();
+            $log.log(' state is now %o', state);
+            $log.log(' sticky = %o', sticky);
           });
         }
 
-        function sfVirtualRepeatWatchExpression(/*scope*/){
-          coll = scope.$eval(ident.collection);
-          if( coll.length !== active.len ){
-            active = {
-              start: active.start,
-              active: active.active,
-              len: coll.length
-            };
+        function sfVirtualRepeatWatchExpression(scope){
+          var coll = scope.$eval(ident.collection);
+          if( coll.length !== state.total ){
+            state.total = coll.length;
+            recomputeActive();
           }
-          return active;
+          return {
+            start: state.firstActive,
+            active: state.active,
+            len: coll.length
+          };
         }
 
         function destroyActiveElements (action, count) {
@@ -354,10 +394,12 @@ mod.directive("sfScroller", function(){
             $log.info('initial listen');
             newElements = addElements(newValue.start, oldEnd, collection, scope, iterStartElement);
             rendered = newElements;
-            rowHeight = computeRowHeight(newElements[0][0]);
+            if( rendered.length ){
+              rowHeight = computeRowHeight(newElements[0][0]);
+            }
           }else{
             var newEnd = newValue.start + newValue.active;
-            var forward = newValue.start > oldValue.start;
+            var forward = newValue.start >= oldValue.start;
             var delta = forward ? newValue.start - oldValue.start
                                 : oldValue.start - newValue.start;
             var endDelta = newEnd >= oldEnd ? newEnd - oldEnd : oldEnd - newEnd;
@@ -391,6 +433,9 @@ mod.directive("sfScroller", function(){
                   collection, scope, lastElement);
                 rendered = rendered.concat(newElements);
               }
+            }
+            if( !rowHeight && rendered.length ){
+              rowHeight = computeRowHeight(rendered[0][0]);
             }
             content.css({'padding-top': newValue.start * rowHeight + 'px'});
           }
